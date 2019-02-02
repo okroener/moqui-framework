@@ -242,7 +242,7 @@ class WebFacadeImpl implements WebFacade {
         ScreenUrlInfo sui = urlInstanceOrig.sui
         ScreenDefinition targetScreen = urlInstanceOrig.sui.targetScreen
 
-        // logger.warn("save hist standalone ${sui.lastStandalone} ${targetScreen.isStandalone()} transition ${urlInstanceOrig.getTargetTransition()}")
+        // logger.warn("save hist ${urlInstanceOrig.path} standalone ${sui.lastStandalone} ${targetScreen.isStandalone()} transition ${urlInstanceOrig.getTargetTransition()}")
         // don't save standalone screens (for sui.lastStandalone int only exclude negative so vapps, etc are saved)
         if (sui.lastStandalone < 0 || targetScreen.isStandalone()) return
         // don't save transition requests, just screens
@@ -317,6 +317,7 @@ class WebFacadeImpl implements WebFacade {
             }
             // add to history list
             screenHistoryList.add(0, [name:nameBuilder.toString(), url:urlWithParams, urlNoParams:urlNoParams,
+                    path:urlInstance.path, pathWithParams:urlInstance.pathWithParams,
                     image:sui.menuImage, imageType:sui.menuImageType, screenLocation:targetScreen.getLocation()])
             // trim the list if needed; keep 40, whatever uses it may display less
             while (screenHistoryList.size() > 40) screenHistoryList.remove(40)
@@ -765,7 +766,13 @@ class WebFacadeImpl implements WebFacade {
         if (contentType) response.setContentType(contentType)
         if (inline) {
             response.addHeader("Content-Disposition", "inline")
-            response.addHeader("Cache-Control", "max-age=3600, must-revalidate, public")
+
+            WebappInfo webappInfo = eci.ecfi.getWebappInfo(eci.webImpl?.webappMoquiName)
+            if (webappInfo != null) {
+                webappInfo.addHeaders("web-resource-inline", response)
+            } else {
+                response.addHeader("Cache-Control", "max-age=86400, must-revalidate, public")
+            }
         } else {
             response.addHeader("Content-Disposition", "attachment; filename=\"${rr.getFileName()}\"; filename*=utf-8''${StringUtilities.encodeAsciiFilename(rr.getFileName())}")
         }

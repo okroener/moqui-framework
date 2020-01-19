@@ -18,6 +18,7 @@ import org.moqui.impl.actions.XmlAction
 import org.moqui.impl.context.ExecutionContextFactoryImpl
 import org.moqui.impl.context.ExecutionContextImpl
 import org.moqui.util.MNode
+import org.moqui.util.StringUtilities
 
 import javax.transaction.Synchronization
 import javax.transaction.xa.XAException
@@ -35,7 +36,7 @@ class ServiceEcaRule {
     protected final MNode secaNode
     public final String location, serviceName, serviceNameNoHash, when
     public final int priority
-    protected final boolean runOnError
+    protected final boolean nameIsPattern, runOnError
 
     protected final XmlAction condition
     protected final XmlAction actions
@@ -46,6 +47,7 @@ class ServiceEcaRule {
         serviceName = secaNode.attribute("service")
         serviceNameNoHash = serviceName.replace("#", "")
         when = secaNode.attribute("when")
+        nameIsPattern = secaNode.attribute("name-is-pattern") == "true"
         runOnError = secaNode.attribute("run-on-error") == "true"
         priority = (secaNode.attribute("priority") ?: "5") as int
 
@@ -58,6 +60,9 @@ class ServiceEcaRule {
         }
         // prep actions
         if (secaNode.hasChild("actions")) {
+            String actionsLocation = null
+            String secaId = secaNode.attribute("id")
+            if (secaId != null && !secaId.isEmpty()) actionsLocation = secaId + "_" + StringUtilities.getRandomString(8)
             actions = new XmlAction(ecfi, secaNode.first("actions"), null) // was location + ".actions" but no unique!
         } else {
             actions = (XmlAction) null
@@ -66,7 +71,8 @@ class ServiceEcaRule {
 
     void runIfMatches(String serviceName, Map<String, Object> parameters, Map<String, Object> results, String when, ExecutionContextImpl ec) {
         // see if we match this event and should run
-        if (!this.serviceNameNoHash.equals(serviceName)) return
+        if (!nameIsPattern && !serviceNameNoHash.equals(serviceName)) return
+        if (nameIsPattern && !serviceName.matches(this.serviceNameNoHash)) return
         if (!this.when.equals(when)) return
         if (!runOnError && ec.getMessage().hasError()) return
 

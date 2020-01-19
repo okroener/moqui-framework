@@ -90,7 +90,7 @@ class ArtifactExecutionFacadeImpl implements ArtifactExecutionFacade {
         if (!isPermitted(aeii, lastAeii, requiresAuthz, countTarpit, true, null)) {
             Deque<ArtifactExecutionInfo> curStack = getStack()
             StringBuilder warning = new StringBuilder()
-            warning.append("User ${eci.user.username ?: eci.user.userId} is not authorized for ${aeii.getActionDescription()} on ${aeii.getTypeDescription()} ${aeii.getName()}")
+            warning.append("User ${eci.user.username ?: eci.user.userId ?: '[No User]'} is not authorized for ${aeii.getActionDescription()} on ${aeii.getTypeDescription()} ${aeii.getName()}")
 
             ArtifactAuthorizationException e = new ArtifactAuthorizationException(warning.toString(), aeii, curStack)
             // end users see this message in vuet mode so better not to add all of this to the main message:
@@ -120,7 +120,8 @@ class ArtifactExecutionFacadeImpl implements ArtifactExecutionFacade {
             // set end time
             lastAeii.setEndTime()
             // count artifact hit (now done here instead of by each caller)
-            if (lastAeii.trackArtifactHit && lastAeii.internalAuthzWasRequired && lastAeii.isAccess)
+            // NOTE DEJ 20191229 removed condition where only artifacts requiring authz are counted: && lastAeii.internalAuthzWasRequired
+            if (lastAeii.trackArtifactHit && lastAeii.isAccess)
                 eci.ecfi.countArtifactHit(lastAeii.internalTypeEnum, lastAeii.actionDetail, lastAeii.nameInternal,
                         lastAeii.parameters, lastAeii.startTimeMillis, lastAeii.getRunningTimeMillisDouble(), lastAeii.outputSize)
             return lastAeii
@@ -512,7 +513,7 @@ class ArtifactExecutionFacadeImpl implements ArtifactExecutionFacade {
                         .useCache(true).list()
                         .filterByCondition(efi.getConditionFactory().makeCondition('releaseDateTime', ComparisonOperator.GREATER_THAN, ufi.getNowTimestamp()), true)
                 if (tarpitLockList.size() > 0) {
-                    Timestamp releaseDateTime = tarpitLockList.first.getTimestamp('releaseDateTime')
+                    Timestamp releaseDateTime = tarpitLockList.get(0).getTimestamp('releaseDateTime')
                     int retryAfterSeconds = ((releaseDateTime.getTime() - System.currentTimeMillis())/1000).intValue()
                     throw new ArtifactTarpitException("User ${userId} has accessed ${aeii.getTypeDescription()} ${aeii.getName()} too many times and may not again until ${eci.l10nFacade.format(releaseDateTime, 'yyyy-MM-dd HH:mm:ss')} (retry after ${retryAfterSeconds} seconds)".toString(), retryAfterSeconds)
                 }
@@ -557,7 +558,7 @@ class ArtifactExecutionFacadeImpl implements ArtifactExecutionFacade {
         if (findEntityName.startsWith("moqui.")) return null
 
         // find applicable EntityFilter records
-        EntityList artifactAuthzFilterList = eci.entity.find("moqui.security.ArtifactAuthzFilter")
+        EntityList artifactAuthzFilterList = eci.entityFacade.find("moqui.security.ArtifactAuthzFilter")
                 .condition("artifactAuthzId", aacv.artifactAuthzId).disableAuthz().useCache(true).list()
 
         if (artifactAuthzFilterList == null) return null
@@ -568,12 +569,31 @@ class ArtifactExecutionFacadeImpl implements ArtifactExecutionFacade {
         for (int i = 0; i < authzFilterSize; i++) {
             EntityValue artifactAuthzFilter = (EntityValue) artifactAuthzFilterList.get(i)
             String entityFilterSetId = (String) artifactAuthzFilter.getNoCheckSimple("entityFilterSetId")
+            String authzApplyCond = (String) artifactAuthzFilter.getNoCheckSimple("applyCond")
+
+            EntityValue entityFilterSet = eci.entityFacade.find("moqui.security.EntityFilterSet")
+                    .condition("entityFilterSetId", entityFilterSetId).disableAuthz().useCache(true).one()
+            String setApplyCond = (String) entityFilterSet.getNoCheckSimple("applyCond")
+
+            boolean hasAuthzCond = authzApplyCond != null && !authzApplyCond.isEmpty()
+            boolean hasSetCond = setApplyCond != null && !setApplyCond.isEmpty()
+            if (hasAuthzCond || hasSetCond) {
+                // for evaluating apply conditions add user context to ec.context
+                // this might be more efficient outside the loop, or perhaps even expect it to be in place outside this method
+                //     (fine for filterFindForUser(), cumbersome for other uses of this method)
+                eci.contextStack.push(eci.userFacade.context)
+                try {
+                    if (hasAuthzCond && !eci.resourceFacade.condition(authzApplyCond, null)) continue
+                    if (hasSetCond && !eci.resourceFacade.condition(setApplyCond, null)) continue
+                } finally {
+                    eci.contextStack.pop()
+                }
+            }
 
             // NOTE: at this level the results could be cached, but worth it? EntityFilter entity list cached already,
             //     some processing for view-entity but mostly only if entityAliasUsedSet, and could only cache if !entityAliasUsedSet
-            EntityList entityFilterList = eci.entity.find("moqui.security.EntityFilter")
-                    .condition("entityFilterSetId", entityFilterSetId)
-                    .disableAuthz().useCache(true).list()
+            EntityList entityFilterList = eci.entityFacade.find("moqui.security.EntityFilter")
+                    .condition("entityFilterSetId", entityFilterSetId).disableAuthz().useCache(true).list()
 
             if (entityFilterList == null) continue
             int entFilterSize = entityFilterList.size()

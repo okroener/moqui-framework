@@ -571,12 +571,31 @@ class ScreenForm {
             // logger.info("Adding form auto entity field [${fieldName}] of type [${efType}], fieldType [${fieldType}] serviceVerb [${serviceVerb}], node: ${newFieldNode}")
             mergeFieldNode(baseFormNode, newFieldNode, false)
         }
+        // separate handling for view-entity with aliases using pq-expression
+        if (ed.isViewEntity) {
+            Map<String, MNode> pqExpressionNodeMap = ed.getPqExpressionNodeMap()
+            if (pqExpressionNodeMap != null) {
+                for (MNode pqExprNode in pqExpressionNodeMap.values()) {
+                    String defaultDisplay = pqExprNode.attribute("default-display")
+                    if (!"true".equals(defaultDisplay)) continue
+
+                    String fieldName = pqExprNode.attribute("name")
+                    MNode newFieldNode = new MNode("field", [name:fieldName])
+                    MNode subFieldNode = newFieldNode.append("default-field", ["validate-entity":ed.getFullEntityName(), "validate-field":fieldName])
+
+                    addAutoEntityField(ed, fieldName, "display", newFieldNode, subFieldNode, baseFormNode)
+                    mergeFieldNode(baseFormNode, newFieldNode, false)
+                }
+            }
+        }
+
         // logger.info("TOREMOVE: after addEntityFields formNode is: ${baseFormNode}")
     }
 
     void addAutoEntityField(EntityDefinition ed, String fieldName, String fieldType, MNode newFieldNode, MNode subFieldNode, MNode baseFormNode) {
+        // NOTE: in some cases this may be null
         FieldInfo fieldInfo = ed.getFieldInfo(fieldName)
-        String efType = fieldInfo.type ?: "text-long"
+        String efType = fieldInfo?.type ?: "text-long"
 
         // to see if this should be a drop-down with data from another entity,
         // find first relationship that has this field as the only key map and is not a many relationship
@@ -593,6 +612,7 @@ class ScreenForm {
                 oneRelKeyMap = km
                 relatedEntityName = relEntityName
                 relatedEd = relEd
+                break
             }
         }
         String keyField = (String) oneRelKeyMap?.keySet()?.iterator()?.next()
@@ -609,7 +629,7 @@ class ScreenForm {
 
             // handle header-field
             if (baseFormNode.name == "form-list" && !newFieldNode.hasChild("header-field"))
-                newFieldNode.append("header-field", ["show-order-by":"case-insensitive"])
+                newFieldNode.append("header-field", ["show-order-by":"true"])
 
             // handle sub field (default-field)
             if (subFieldNode == null) break
@@ -694,22 +714,21 @@ class ScreenForm {
             if (efType == "date" || efType == "time") {
                 headerFieldNode.append("date-find", [type:efType])
             } else if (efType == "date-time") {
-                headerFieldNode.append("date-period", null)
+                headerFieldNode.append("date-period", [time:"true"])
             } else if (efType.startsWith("number-") || efType.startsWith("currency-")) {
                 headerFieldNode.append("range-find", [size:'10'])
                 newFieldNode.attributes.put("align", "right")
-                String function = fieldInfo.fieldNode.attribute("function")
+                String function = fieldInfo?.fieldNode?.attribute("function")
                 if (function != null && function in ['min', 'max', 'avg']) {
                     newFieldNode.attributes.put("show-total", function)
                 } else {
                     newFieldNode.attributes.put("show-total", "sum")
                 }
-
             } else {
                 if (oneRelNode != null) {
                     addEntityFieldDropDown(oneRelNode, headerFieldNode, relatedEd, relKeyField, "")
                 } else {
-                    headerFieldNode.append("text-find", ['hide-options':'true', size:'15'])
+                    headerFieldNode.append("text-find", [size:'30', "default-operator":"begins", "ignore-case":"false"])
                 }
             }
             // handle sub field (default-field)
@@ -1645,6 +1664,8 @@ class ScreenForm {
         LinkedHashSet<String> getDisplayedFields() { return displayedFieldSet }
 
         Object getListObject(boolean aggregateList) {
+            ContextStack context = ecfi.getEci().contextStack
+
             Object listObject
             String listName = formInstance.formNode.attribute("list")
             Set<String> includeFields = new HashSet<>(displayedFieldSet)
@@ -1693,7 +1714,6 @@ class ScreenForm {
                 }
 
                 // put in context for external use
-                ContextStack context = ecfi.getEci().contextStack
                 context.put(listName, efList)
                 context.put(listName.concat("_xafind"), ef)
 
@@ -1705,23 +1725,24 @@ class ScreenForm {
                     if (ef.getLimit() == null) {
                         count = efList.size()
                         pageSize = count > 20 ? count : 20
-                        pageIndex = efList.pageIndex
+                        pageIndex = efList.getPageIndex()
                     } else if (useCache) {
                         count = efList.size()
                         efList.filterByLimit(sfiNode.attribute("input-fields-map"), true)
-                        pageSize = efList.pageSize
-                        pageIndex = efList.pageIndex
+                        pageSize = efList.getPageSize()
+                        pageIndex = efList.getPageIndex()
                     } else {
                         pageIndex = ef.pageIndex
                         pageSize = ef.pageSize
                         // this can be expensive, only get count if efList size is equal to pageSize (can skip if no paginate needed)
-                        if (efList.size() < pageSize) count = efList.size()
+                        if (efList.size() < pageSize) count = efList.size() + pageSize * pageIndex
                         else count = ef.count()
                     }
-                    long maxIndex = (new BigDecimal(count-1)).divide(new BigDecimal(pageSize), 0, BigDecimal.ROUND_DOWN).longValue()
+                    long maxIndex = (new BigDecimal(count-1)).divide(new BigDecimal(pageSize), 0, RoundingMode.DOWN).longValue()
                     long pageRangeLow = (pageIndex * pageSize) + 1
                     long pageRangeHigh = (pageIndex * pageSize) + pageSize
                     if (pageRangeHigh > count) pageRangeHigh = count
+                    // logger.info("count ${count} pageSize ${pageSize} maxIndex ${maxIndex} pageRangeLow ${pageRangeLow} pageRangeHigh ${pageRangeHigh}")
 
                     context.put(listName.concat("Count"), count)
                     context.put(listName.concat("PageIndex"), pageIndex)
@@ -1738,7 +1759,16 @@ class ScreenForm {
 
             // NOTE: always call AggregationUtil.aggregateList, passing aggregateList to tell it to do sub-lists or not
             // this does the pre-processing for all form-list renders, handles row-actions, field.@from, etc
-            return formInstance.aggregationUtil.aggregateList(listObject, includeFields, aggregateList, ecfi.getEci())
+            ArrayList<Map<String, Object>> aggList = formInstance.aggregationUtil.aggregateList(listObject, includeFields, aggregateList, ecfi.getEci())
+
+            // set _formListRendered and _formListResultCount so code running later on knows what happened during the screen render
+            context.getSharedMap().put("_formListRendered", true)
+            int aggListSize = aggList.size()
+            Object curResultCount = context.getSharedMap().get("_formListResultCount")
+            if (curResultCount instanceof Number) aggListSize += ((Number) curResultCount).intValue()
+            context.getSharedMap().put("_formListResultCount", aggListSize)
+
+            return aggList
         }
 
         List<Map<String, Object>> getUserFormListFinds(ExecutionContextImpl ec) {
@@ -2166,15 +2196,16 @@ class ScreenForm {
 
         JsonSlurper slurper = new JsonSlurper()
         List<Map> columnsTree = (List<Map>) slurper.parseText(columnsTreeStr)
-
         CollectionUtilities.orderMapList(columnsTree, ['order'])
+
         int columnIndex = 0
-        for (Map columnMap in columnsTree) {
+        for (Map columnMap in (List<Map>) columnsTree) {
             if (columnMap.get("id") == "hidden") continue
             List<Map> children = (List<Map>) columnMap.get("children")
             CollectionUtilities.orderMapList(children, ['order'])
+
             int columnSequence = 0
-            for (Map fieldMap in children) {
+            for (Map fieldMap in (List<Map>) children) {
                 String fieldName = (String) fieldMap.get("id")
                 // logger.info("Adding field ${fieldName} to column ${columnIndex} at sequence ${columnSequence}")
                 ec.service.sync().name("create#moqui.screen.form.FormConfigField")

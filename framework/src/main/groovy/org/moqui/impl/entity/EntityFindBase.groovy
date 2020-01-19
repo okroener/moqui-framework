@@ -72,6 +72,7 @@ abstract class EntityFindBase implements EntityFind {
     protected Integer offset = (Integer) null
     protected Integer limit = (Integer) null
     protected boolean forUpdate = false
+    protected boolean useClone = false
 
     protected int resultSetType = defaultResultSetType
     protected int resultSetConcurrency = ResultSet.CONCUR_READ_ONLY
@@ -79,6 +80,8 @@ abstract class EntityFindBase implements EntityFind {
     protected Integer maxRows = (Integer) null
 
     protected boolean disableAuthz = false
+    protected boolean requireSearchFormParameters = false
+    protected boolean hasSearchFormParameters = false
 
     protected ArrayList<String> queryTextList = new ArrayList<>()
 
@@ -388,7 +391,10 @@ abstract class EntityFindBase implements EntityFind {
         }
 
         boolean addedConditions = false
-        if (inputFieldsMap != null && inputFieldsMap.size() > 0) addedConditions = processInputFields(inputFieldsMap, skipFieldSet, ec)
+        if (inputFieldsMap != null && inputFieldsMap.size() > 0)
+            addedConditions = processInputFields(inputFieldsMap, skipFieldSet, ec)
+        hasSearchFormParameters = addedConditions
+
         if (!addedConditions && defaultParameters != null && defaultParameters.size() > 0) {
             processInputFields(defaultParameters, skipFieldSet, ec)
             for (Map.Entry<String, Object> dpEntry in defaultParameters.entrySet()) ec.contextStack.put(dpEntry.key, dpEntry.value)
@@ -590,6 +596,8 @@ abstract class EntityFindBase implements EntityFind {
     @Override EntityFind useCache(Boolean useCache) { this.useCache = useCache; return this }
     @Override boolean getUseCache() { return this.useCache }
 
+    @Override EntityFind useClone(boolean uc) { useClone = uc; return this }
+
     // ======================== Advanced Options ==============================
 
     @Override EntityFind distinct(boolean distinct) { this.distinct = distinct; return this }
@@ -640,6 +648,7 @@ abstract class EntityFindBase implements EntityFind {
     }
 
     @Override EntityFind disableAuthz() { disableAuthz = true; return this }
+    @Override EntityFind requireSearchFormParameters(boolean req) { this.requireSearchFormParameters = req; return this }
 
     @Override
     boolean shouldCache() {
@@ -979,6 +988,11 @@ abstract class EntityFindBase implements EntityFind {
     }
 
     protected EntityList listInternal(ExecutionContextImpl ec, EntityDefinition ed) throws EntityException, SQLException {
+        if (requireSearchFormParameters && !hasSearchFormParameters) {
+            logger.info("No parameters for list find on ${ed.fullEntityName}, not doing search")
+            return new EntityListImpl(efi)
+        }
+
         EntityJavaUtil.EntityInfo entityInfo = ed.entityInfo
         boolean isViewEntity = entityInfo.isView
 
@@ -1137,6 +1151,8 @@ abstract class EntityFindBase implements EntityFind {
         }
     }
     protected EntityListIterator iteratorInternal(ExecutionContextImpl ec, EntityDefinition ed) throws EntityException, SQLException {
+        if (requireSearchFormParameters && !hasSearchFormParameters) return null
+
         EntityJavaUtil.EntityInfo entityInfo = ed.entityInfo
         boolean isViewEntity = entityInfo.isView
 
@@ -1260,6 +1276,8 @@ abstract class EntityFindBase implements EntityFind {
         }
     }
     protected long countInternal(ExecutionContextImpl ec, EntityDefinition ed) throws EntityException, SQLException {
+        if (requireSearchFormParameters && !hasSearchFormParameters) return 0L
+
         EntityJavaUtil.EntityInfo entityInfo = ed.entityInfo
         boolean isViewEntity = entityInfo.isView
 

@@ -49,9 +49,9 @@ class ScheduledJobRunner implements Runnable {
     private final static Logger logger = LoggerFactory.getLogger(ScheduledJobRunner.class)
     private final ExecutionContextFactoryImpl ecfi
 
-    private final CronDefinition cronDefinition = CronDefinitionBuilder.instanceDefinitionFor(CronType.QUARTZ)
-    private final CronParser parser = new CronParser(cronDefinition)
-    private final Map<String, ExecutionTime> executionTimeByExpression = new HashMap<>()
+    private final static CronDefinition cronDefinition = CronDefinitionBuilder.instanceDefinitionFor(CronType.QUARTZ)
+    private final static CronParser parser = new CronParser(cronDefinition)
+    private final static Map<String, ExecutionTime> executionTimeByExpression = new HashMap<>()
     private long lastExecuteTime = 0
     private int executeCount = 0, totalJobsRun = 0, lastJobsActive = 0, lastJobsPaused = 0
 
@@ -149,6 +149,23 @@ class ScheduledJobRunner implements Runnable {
                         if (lastSchedule.isBefore(lastRunDt)) continue
                     }
 
+                    // if the last run had an error check the minRetryTime, don't run if hasn't been long enough
+                    EntityValue lastJobRun = efi.find("moqui.service.job.ServiceJobRun").condition("jobName", jobName)
+                            .orderBy("-startTime").limit(1).useCache(false).list().getFirst()
+                    if (lastJobRun != null && "Y".equals(lastJobRun.hasError)) {
+                        Timestamp lastErrorTime = (Timestamp) lastJobRun.endTime ?: (Timestamp) lastJobRun.startTime
+                        if (lastErrorTime != (Timestamp) null) {
+                            ZonedDateTime lastErrorDt = ZonedDateTime.ofInstant(Instant.ofEpochMilli(lastErrorTime.getTime()), now.getZone())
+                            Long minRetryTime = (Long) serviceJob.minRetryTime ?: 5L
+                            ZonedDateTime retryCheckTime = now.minusMinutes(minRetryTime.intValue())
+                            // if last error time after retry check time don't run the job
+                            if (lastErrorDt.isAfter(retryCheckTime)) {
+                                logger.info("Not retrying job ${jobName} after error, before ${minRetryTime} min retry minutes (error run at ${lastErrorDt})")
+                                continue
+                            }
+                        }
+                    }
+
                     // create a job run and lock it
                     serviceJobRun = efi.makeValue("moqui.service.job.ServiceJobRun")
                             .set("jobName", jobName).setSequencedIdPrimary().create()
@@ -213,7 +230,7 @@ class ScheduledJobRunner implements Runnable {
     }
 
     // ExecutionTime appears to be reusable, so cache by cronExpression
-    ExecutionTime getExecutionTime(String cronExpression) {
+    static ExecutionTime getExecutionTime(String cronExpression) {
         ExecutionTime cachedEt = executionTimeByExpression.get(cronExpression)
         if (cachedEt != null) return cachedEt
 

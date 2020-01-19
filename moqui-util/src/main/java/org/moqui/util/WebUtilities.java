@@ -225,7 +225,7 @@ public class WebUtilities {
         if (contentType == null || contentType.isEmpty()) contentType = "text/plain";
         String resultString = "";
 
-        SslContextFactory sslContextFactory = new SslContextFactory();
+        SslContextFactory sslContextFactory = new SslContextFactory.Client(true);
         HttpClient httpClient = new HttpClient(sslContextFactory);
 
         try {
@@ -251,7 +251,7 @@ public class WebUtilities {
     public static String simpleHttpMapRequest(String location, Map requestMap) {
         String resultString = "";
 
-        SslContextFactory sslContextFactory = new SslContextFactory();
+        SslContextFactory sslContextFactory = new SslContextFactory.Client(true);
         HttpClient httpClient = new HttpClient(sslContextFactory);
 
         try {
@@ -301,6 +301,7 @@ public class WebUtilities {
     public static boolean testSerialization(String name, Object value) {
         // return true;
         /* for testing purposes only, don't enable by default: */
+        // logger.warn("Test ser " + name + "(" + (value != null ? value.getClass().getName() : "") + ":" + (value != null && value.getClass().getClassLoader() != null ? value.getClass().getClassLoader().getClass().getName() : "") + ")" + " value: " + value);
         if (value == null) return true;
         try {
             ObjectOutputStream out = new ObjectOutputStream(new ByteArrayOutputStream());

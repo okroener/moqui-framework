@@ -45,6 +45,11 @@ import java.util.concurrent.Future
 class ElasticFacadeImpl implements ElasticFacade {
     protected final static Logger logger = LoggerFactory.getLogger(ElasticFacadeImpl.class)
 
+    // Max HTTP Response Size for Search - this may need to be configurable, set very high for now (appears that Jetty only grows the buffer as needed for response content)
+    public static int MAX_RESPONSE_SIZE_SEARCH = 100 * 1024 * 1024
+    // Request Timeout, another thing that could be configurable but can be specified via API, set to 50 to give plenty of time for TX/etc cleanup
+    public static int DEFAULT_REQUEST_TIMEOUT = 50
+
     public final static ObjectMapper jacksonMapper = new ObjectMapper()
             .setSerializationInclusion(JsonInclude.Include.ALWAYS)
             .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
@@ -328,18 +333,37 @@ class ElasticFacadeImpl implements ElasticFacade {
             RestClient restClient = makeRestClient(Method.POST, path, null).contentType("application/x-ndjson")
             restClient.timeout(600)
             restClient.text(bodyWriter.toString())
+            // System.out.println("Bulk:\n${bodyWriter.toString()}")
 
-            return restClient.call()
+            RestClient.RestResponse response = restClient.call()
+            // System.out.println("Bulk Response: ${response.statusCode} ${response.reasonPhrase}\n${response.text()}")
+            return response
         }
 
         @Override
         void bulkIndex(String index, String idField, List<Map> documentList) {
+            bulkIndex(index, null, idField, documentList)
+        }
+        void bulkIndex(String index, String docType, String idField, List<Map> documentList) {
             List<Map> actionSourceList = new ArrayList<>(documentList.size() * 2)
             boolean hasId = idField != null && !idField.isEmpty()
+            int loopIdx = 0
             for (Map document in documentList) {
-                Map actionMap = hasId ? [index:[_index:index, _id:document.get(idField)]] : [index:[_index:index]]
+                Map indexMap = new LinkedHashMap()
+                indexMap.put("_index", index)
+                if (hasId) {
+                    Object idValue = document.get(idField)
+                    if (idValue != null) {
+                        indexMap.put("_id", idValue)
+                    } else {
+                        logger.warn("Bulk Index to ${index} found null value for ${idField} in doc ${loopIdx}")
+                    }
+                }
+                if (esVersionUnder7) indexMap.put("_type", docType ?: "_doc")
+                Map actionMap = [index:indexMap]
                 actionSourceList.add(actionMap)
                 actionSourceList.add(document)
+                loopIdx++
             }
             bulk(index, actionSourceList)
         }
@@ -377,8 +401,10 @@ class ElasticFacadeImpl implements ElasticFacade {
         @Override
         Map search(String index, Map searchMap) {
             String path = index != null && !index.isEmpty() ? index + "/_search" : "_search"
-            RestClient.RestResponse response = makeRestClient(Method.GET, path, null)
+            // logger.warn("Search ${index}\n${objectToJson(searchMap)}")
+            RestClient.RestResponse response = makeRestClient(Method.GET, path, null).maxResponseSize(MAX_RESPONSE_SIZE_SEARCH)
                     .text(objectToJson(searchMap)).call()
+            // System.out.println("Search Response: ${response.statusCode} ${response.reasonPhrase}\n${response.text()}")
             checkResponse(response, "Search", index)
             return (Map) jsonToObject(response.text())
         }
@@ -386,6 +412,20 @@ class ElasticFacadeImpl implements ElasticFacade {
         List<Map> searchHits(String index, Map searchMap) {
             Map resultMap = search(index, searchMap)
             return (List) ((Map) resultMap.hits).hits
+        }
+        @Override
+        Map validateQuery(String index, Map queryMap, boolean explain) {
+            String path = index != null && !index.isEmpty() ? index + "/_validate/query" : "_validate/query"
+            String queryJson = objectToJson([query:queryMap])
+            RestClient.RestResponse response = makeRestClient(Method.GET, path, explain ? [explain:'true'] : null)
+                    .text(queryJson).call()
+            checkResponse(response, "Validate Query", index)
+            Map responseMap = (Map) jsonToObject(response.text())
+            // System.out.println("Validate Query Response: ${response.statusCode} ${response.reasonPhrase} Value? ${responseMap.get("valid") as boolean}\n${response.text()}")
+            // return null if valid
+            if (responseMap.get("valid")) return null
+            logger.warn("Invalid ElasticSearch query\n${queryJson}\nExplanations: ${responseMap.explanations}")
+            return responseMap
         }
 
         @Override
@@ -402,7 +442,8 @@ class ElasticFacadeImpl implements ElasticFacade {
 
         @Override
         RestClient makeRestClient(Method method, String path, Map<String, String> parameters) {
-            RestClient restClient = new RestClient().withRequestFactory(requestFactory).method(method).contentType("application/json").timeout(60)
+            RestClient restClient = new RestClient().withRequestFactory(requestFactory).method(method)
+                    .contentType("application/json").timeout(DEFAULT_REQUEST_TIMEOUT)
             restClient.uri().protocol(clusterProtocol).host(clusterHost).port(clusterPort).path(path).parameters(parameters).build()
             // see https://www.elastic.co/guide/en/elasticsearch/reference/7.4/http-clients.html
             if (clusterUser) restClient.basicAuth(clusterUser, clusterPassword)
@@ -491,17 +532,21 @@ class ElasticFacadeImpl implements ElasticFacade {
                 // hopefully not needed with Jackson settings, but if so: ElasticSearchUtil.convertTypesForEs(document)
 
                 // add the document to the bulk index
-                actionSourceList.add([index:[_index:esIndexName, _id:_id]])
+                if (esVersionUnder7) {
+                    actionSourceList.add([index:[_index:esIndexName, _type:_type, _id:_id]])
+                } else {
+                    actionSourceList.add([index:[_index:esIndexName, _id:_id]])
+                }
                 actionSourceList.add(document)
 
                 curBulkDocs++
 
                 if (curBulkDocs >= docsPerBulk) {
-                    logger.info("Bulk index batch ${batchCount}, cur docs ${curBulkDocs} of ${docListSize}, last index ${esIndexName} (for index ${_index} type ${_type})")
+                    // logger.info("Bulk index batch ${batchCount}, cur docs ${curBulkDocs} of ${docListSize}, last index ${esIndexName} (for index ${_index} type ${_type})")
                     // logger.warn("last document: ${document}")
                     RestClient.RestResponse response = bulkResponse(null, actionSourceList)
                     if (response.statusCode < 200 || response.statusCode >= 300) {
-                        ecfi.eci.message.addMessage("Bulk index failed with code ${response.statusCode}: ${response.reasonPhrase}", "danger")
+                        checkResponse(response, "Bulk index", null)
                         curBulkDocs = 0
                         actionSourceList = null
                         break
@@ -520,11 +565,9 @@ class ElasticFacadeImpl implements ElasticFacade {
                 }
             }
             if (curBulkDocs > 0) {
-                logger.info("Bulk index last, cur docs ${curBulkDocs} of ${docListSize}, last index ${esIndexName} (for index ${_index} type ${_type})")
+                // logger.info("Bulk index last, cur docs ${curBulkDocs} of ${docListSize}, last index ${esIndexName} (for index ${_index} type ${_type})")
                 RestClient.RestResponse response = bulkResponse(null, actionSourceList)
-                if (response.statusCode < 200 || response.statusCode >= 300) {
-                    ecfi.eci.message.addMessage("Bulk index failed with code ${response.statusCode}: ${response.reasonPhrase}", "danger")
-                }
+                checkResponse(response, "Bulk index", null)
 
                 /* don't support getting versions any more, generally waste of resources:
                 BulkItemResponse[] itemResponses = bulkResponse.getItems()

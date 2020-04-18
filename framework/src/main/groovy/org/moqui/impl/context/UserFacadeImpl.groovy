@@ -218,7 +218,10 @@ class UserFacadeImpl implements UserFacade {
                     visitorCookie.setMaxAge(60 * 60 * 24 * 365)
                     visitorCookie.setPath("/")
                     visitorCookie.setHttpOnly(true)
+                    if (request.isSecure()) visitorCookie.setSecure(true)
                     response.addCookie(visitorCookie)
+
+                    session.setAttribute("moqui.visitorId", cookieVisitorId)
                 }
             }
             visitorIdInternal = cookieVisitorId

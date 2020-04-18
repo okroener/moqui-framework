@@ -541,9 +541,20 @@ public class CollectionUtilities {
         if (theList == null) theList = new ArrayList();
 
         final Object pageIndexObj = context.get("pageIndex");
-        int pageIndex = ObjectUtilities.isEmpty(pageIndexObj) ? 0 : Integer.parseInt(pageIndexObj.toString());
+        int pageIndex = 0;
+        if (!ObjectUtilities.isEmpty(pageIndexObj)) {
+            try { pageIndex = Integer.parseInt(pageIndexObj.toString()); }
+            catch (Exception e) { /* just use the 0 default above */ }
+        }
+        if (pageIndex < 0) pageIndex = 0;
+
         final Object pageSizeObj = context.get("pageSize");
-        int pageSize = ObjectUtilities.isEmpty(pageSizeObj) ? 20 : Integer.parseInt(pageSizeObj.toString());
+        int pageSize = 20;
+        if (!ObjectUtilities.isEmpty(pageSizeObj)) {
+            try { pageSize = Integer.parseInt(pageSizeObj.toString()); }
+            catch (Exception e) { /* just use the 20 default above */ }
+        }
+        if (pageSize < 0) pageSize = 20;
 
         int count = theList.size();
 

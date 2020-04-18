@@ -241,15 +241,21 @@ class ElasticFacadeImpl implements ElasticFacade {
 
         @Override
         void createIndex(String index, Map docMapping, String alias) {
-            createIndex(index, null, docMapping, alias)
+            createIndex(index, null, docMapping, alias, null)
         }
         void createIndex(String index, String docType, Map docMapping, String alias) {
+            createIndex(index, docType, docMapping, alias, null)
+        }
+        void createIndex(String index, String docType, Map docMapping, String alias, Map settings) {
             RestClient restClient = makeRestClient(Method.PUT, index, null)
             if (docMapping || alias) {
                 Map requestMap = new HashMap()
                 if (docMapping) {
                     if (esVersionUnder7) requestMap.put("mappings", [(docType?:'_doc'):docMapping])
                     else requestMap.put("mappings", docMapping)
+                }
+                if (settings) {
+                    requestMap.put('settings', settings)
                 }
                 if (alias) requestMap.put("aliases", [(alias):[:]])
                 restClient.text(objectToJson(requestMap))
@@ -420,11 +426,12 @@ class ElasticFacadeImpl implements ElasticFacade {
             RestClient.RestResponse response = makeRestClient(Method.GET, path, explain ? [explain:'true'] : null)
                     .text(queryJson).call()
             checkResponse(response, "Validate Query", index)
-            Map responseMap = (Map) jsonToObject(response.text())
+            String responseText = response.text()
+            Map responseMap = (Map) jsonToObject(responseText)
             // System.out.println("Validate Query Response: ${response.statusCode} ${response.reasonPhrase} Value? ${responseMap.get("valid") as boolean}\n${response.text()}")
             // return null if valid
             if (responseMap.get("valid")) return null
-            logger.warn("Invalid ElasticSearch query\n${queryJson}\nExplanations: ${responseMap.explanations}")
+            logger.warn("Invalid ElasticSearch query\n${JsonOutput.prettyPrint(queryJson)}\nResponse: ${JsonOutput.prettyPrint(responseText)}")
             return responseMap
         }
 
@@ -473,17 +480,26 @@ class ElasticFacadeImpl implements ElasticFacade {
         }
         synchronized protected void storeIndexAndMapping(String indexName, EntityValue dd) {
             String dataDocumentId = (String) dd.getNoCheckSimple("dataDocumentId")
+            String manualMappingServiceName = (String) dd.getNoCheckSimple("manualMappingServiceName")
             String esIndexName = ddIdToEsIndex(dataDocumentId)
 
             // logger.warn("========== Checking index ${esIndexName} with alias ${indexName} , hasIndex=${hasIndex}")
             boolean hasIndex = indexExists(esIndexName)
             Map docMapping = makeElasticSearchMapping(dataDocumentId, ecfi)
+            Map settings = null
+
+            if (manualMappingServiceName) {
+                def serviceResult = ecfi.service.sync().name(manualMappingServiceName).parameter('mapping', docMapping).call()
+                docMapping = (Map) serviceResult.mapping
+                settings = (Map) serviceResult.settings
+            }
+
             if (hasIndex) {
                 logger.info("Updating ElasticSearch index ${esIndexName} for ${dataDocumentId} document mapping")
                 putMapping(esIndexName, dataDocumentId, docMapping)
             } else {
                 logger.info("Creating ElasticSearch index ${esIndexName} for ${dataDocumentId} with alias ${indexName} and adding document mapping")
-                createIndex(esIndexName, dataDocumentId, docMapping, indexName)
+                createIndex(esIndexName, dataDocumentId, docMapping, indexName, settings)
                 // logger.warn("========== Added mapping for ${dataDocumentId} to index ${esIndexName}:\n${docMapping}")
             }
         }
@@ -667,7 +683,7 @@ class ElasticFacadeImpl implements ElasticFacade {
     static final Map<String, String> esTypeMap = [id:'keyword', 'id-long':'keyword', date:'date', time:'text',
             'date-time':'date', 'number-integer':'long', 'number-decimal':'double', 'number-float':'double',
             'currency-amount':'double', 'currency-precise':'double', 'text-indicator':'keyword', 'text-short':'text',
-            'text-medium':'text', 'text-long':'text', 'text-very-long':'text', 'binary-very-long':'binary']
+            'text-medium':'text', 'text-intermediate':'text', 'text-long':'text', 'text-very-long':'text', 'binary-very-long':'binary']
 
     static Map makeElasticSearchMapping(String dataDocumentId, ExecutionContextFactoryImpl ecfi) {
         EntityValue dataDocument = ecfi.entityFacade.find("moqui.entity.document.DataDocument")

@@ -277,8 +277,15 @@ along with this software (see the LICENSE.md file). If not, see
             <key-map field-name="currencyUomId"/></relationship>
         <relationship type="many" related="moqui.security.UserGroupMember" short-alias="groups">
             <key-map field-name="userId"/></relationship>
+        <relationship type="many" related="moqui.security.UserLoginKey" short-alias="loginKeys">
+            <key-map field-name="userId"/></relationship>
+        <relationship type="many" related="moqui.security.UserLoginHistory" short-alias="loginHistories">
+            <key-map field-name="userId"/></relationship>
         <relationship type="many" related="moqui.security.UserPreference" short-alias="preferences">
             <key-map field-name="userId"/></relationship>
+        <relationship type="many" related="moqui.security.user.NotificationTopicUser" short-alias="notificationTopics">
+            <key-map field-name="userId"/></relationship>
+
         <!-- NOTE: both username and emailAddress must be unique -->
         <index name="USERACCT_USERNAME" unique="true"><index-field name="username"/></index>
         <index name="USERACCT_EMAILADDR" unique="true"><index-field name="emailAddress"/></index>
@@ -286,6 +293,18 @@ along with this software (see the LICENSE.md file). If not, see
             <moqui.security.UserAccount userId="_NA_" username="_NA_" userFullName="Not Applicable" currentPassword="" disabled="Y"/>
         </seed-data>
     </entity>
+    <view-entity entity-name="UserAccountAndGroup" package="moqui.security">
+        <member-entity entity-alias="UAC" entity-name="moqui.security.UserAccount"/>
+        <member-relationship entity-alias="UGM" join-from-alias="UAC" relationship="groups" join-optional="true"/>
+        <member-relationship entity-alias="ULH" join-from-alias="UAC" relationship="loginHistories" join-optional="true"/>
+        <member-relationship entity-alias="NTU" join-from-alias="UAC" relationship="notificationTopics" join-optional="true"/>
+        <alias-all entity-alias="UAC"/>
+        <alias-all entity-alias="UGM"/>
+        <alias name="loginFromDate" entity-alias="ULH" field="fromDate"/>
+        <alias name="topic" entity-alias="NTU"/>
+        <alias name="receiveNotifications" entity-alias="NTU"/>
+        <alias name="emailNotifications" entity-alias="NTU"/>
+    </view-entity>
 
     <entity entity-name="UserGroup" package="moqui.security" use="configuration" short-alias="userGroups">
         <field name="userGroupId" type="id" is-pk="true"/>
@@ -435,6 +454,7 @@ along with this software (see the LICENSE.md file). If not, see
         <field name="receiveNotifications" type="text-indicator"><description>If Y all applicable users will be sent
             notification messages. If N users must subscribe (NotificationTopicUser) to receive messages.</description></field>
         <field name="emailTemplateId" type="id"><description>If is specified use this template to send a notification email to each user with emailNotifications=Y</description></field>
+        <field name="emailMessageSave" type="text-indicator"/>
         <relationship type="one" related="moqui.basic.email.EmailTemplate"/>
     </entity>
     <entity entity-name="NotificationTopicUser" package="moqui.security.user" use="configuration" cache="true">
@@ -467,10 +487,10 @@ along with this software (see the LICENSE.md file). If not, see
         <field name="userId" type="id" is-pk="true"/>
         <field name="sentDate" type="date-time"/>
         <field name="viewedDate" type="date-time"/>
-        <!-- not saving EmailMessage for now: <field name="emailMessageId" type="id"/> -->
+        <field name="emailMessageId" type="id"/>
         <relationship type="one" related="moqui.security.user.NotificationMessage" short-alias="notification"/>
         <relationship type="one-nofk" related="moqui.security.UserAccount" short-alias="user"/>
-        <!-- not saving EmailMessage for now: <relationship type="one" related="moqui.basic.email.EmailMessage" short-alias="emailMessage"/> -->
+        <relationship type="one" related="moqui.basic.email.EmailMessage" short-alias="emailMessage"/>
         <index name="NOTMSGUSR_UID_VD" unique="false"><index-field name="userId"/><index-field name="viewedDate"/></index>
     </entity>
     <view-entity entity-name="NotificationMessageByUser" package="moqui.security.user" cache="never">

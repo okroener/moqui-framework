@@ -199,8 +199,11 @@ class ScreenRenderImpl implements ScreenRender {
         if (response != null) {
             if (servletContextPath != null && !servletContextPath.isEmpty() && redirectUrl.startsWith("/"))
                 redirectUrl = servletContextPath + redirectUrl
-            if ("vuet".equals(renderMode)) {
-                if (logger.isInfoEnabled()) logger.info("Redirecting (vuet) to ${redirectUrl} instead of rendering ${this.getScreenUrlInfo().getFullPathNameList()}")
+
+            MNode stoNode = sfi.ecfi.getConfXmlRoot().first("screen-facade")
+                    .first("screen-text-output", "type", renderMode)
+            if (stoNode != null && "true".equals(stoNode.attribute("always-standalone"))) {
+                if (logger.isInfoEnabled()) logger.info("Redirecting with 205 and X-Redirect-To ${redirectUrl} instead of rendering ${this.getScreenUrlInfo().getFullPathNameList()}")
                 response.addHeader("X-Redirect-To", redirectUrl)
                 // use code 205 (Reset Content) for client router handled redirect
                 response.setStatus(HttpServletResponse.SC_RESET_CONTENT)
@@ -282,30 +285,6 @@ class ScreenRenderImpl implements ScreenRender {
         if (logger.traceEnabled) logger.trace("Rendering screen ${rootScreenLocation} with path list ${originalScreenPathNameList}")
         // logger.info("Rendering screen [${rootScreenLocation}] with path list [${originalScreenPathNameList}]")
 
-        // if there is a formListFindId parameter see if any matching parameters are set otherwise set all configured params
-        // NOTE: needs to be done very early in screen rendering so that parameters are available for actions, etc
-        // NOTE: this should allow override of parameters along with a formListFindId while defaulting to configured ones,
-        //     but is far from ideal in detecting whether configured parms should be used
-        String formListFindId = ec.contextStack.getByString("formListFindId")
-        if (formListFindId != null && !formListFindId.isEmpty()) {
-            Map<String, String> flfParameters = ScreenForm.makeFormListFindParameters(formListFindId, ec)
-            boolean foundMatchingParm = false
-            for (String flfParmName in flfParameters.keySet()) {
-                if ("formListFindId".equals(flfParmName)) continue
-                Object parmValue = ec.contextStack.getByString(flfParmName)
-                if (!ObjectUtilities.isEmpty(parmValue)) {
-                    foundMatchingParm = true
-                    break
-                }
-            }
-            if (!foundMatchingParm) {
-                EntityValue formListFind = ec.entityFacade.fastFindOne("moqui.screen.form.FormListFind", true, true, formListFindId)
-                if (formListFind?.orderByField) ec.contextStack.put("orderByField", formListFind.orderByField)
-                ec.contextStack.putAll(flfParameters)
-                // logger.warn("Found formListFindId and no matching parameters, orderByField [${formListFind?.orderByField}], added paramters: ${flfParameters}")
-            }
-        }
-
         WebFacade web = ec.getWeb()
         if ((lastStandalone == null || lastStandalone.isEmpty()) && web != null)
             lastStandalone = (String) web.requestParameters.lastStandalone
@@ -316,6 +295,32 @@ class ScreenRenderImpl implements ScreenRender {
         // if the target of the url doesn't exist throw exception
         screenUrlInfo.checkExists()
         screenUrlInstance = screenUrlInfo.getInstance(this, false)
+
+        // if there is a formListFindId parameter see if any matching parameters are set otherwise set all configured params
+        // NOTE: needs to be done very early in screen rendering so that parameters are available for actions, etc
+        // NOTE: this should allow override of parameters along with a formListFindId while defaulting to configured ones,
+        //     but is far from ideal in detecting whether configured parms should be used
+        String formListFindId = ec.contextStack.getByString("formListFindId")
+        if (formListFindId != null && !formListFindId.isEmpty()) {
+            Set<String> targetScreenParmNames = screenUrlInfo.targetScreen?.getParameterMap()?.keySet()
+            Map<String, String> flfParameters = ScreenForm.makeFormListFindParameters(formListFindId, ec)
+            boolean foundMatchingParm = false
+            for (String flfParmName in flfParameters.keySet()) {
+                if ("formListFindId".equals(flfParmName)) continue
+                if (targetScreenParmNames != null && targetScreenParmNames.contains(flfParmName)) continue
+                Object parmValue = ec.contextStack.getByString(flfParmName)
+                if (!ObjectUtilities.isEmpty(parmValue)) {
+                    foundMatchingParm = true
+                    break
+                }
+            }
+            if (!foundMatchingParm) {
+                EntityValue formListFind = ec.entityFacade.fastFindOne("moqui.screen.form.FormListFind", true, true, formListFindId)
+                if (formListFind?.orderByField && !ec.contextStack.getByString("orderByField")) ec.contextStack.put("orderByField", formListFind.orderByField)
+                ec.contextStack.putAll(flfParameters)
+                // logger.warn("Found formListFindId and no matching parameters, orderByField [${formListFind?.orderByField}], added paramters: ${flfParameters}")
+            }
+        }
 
         if (web != null) {
             // clear out the parameters used for special screen URL config
@@ -1409,7 +1414,7 @@ class ScreenRenderImpl implements ScreenRender {
 
         Object obj = getFieldValue(fieldNodeWrapper, defaultValue)
         if (obj == null) return ""
-        if (obj instanceof String) return (String) obj
+        if (obj instanceof CharSequence) return obj.toString()
         String strValue = ec.l10nFacade.format(obj, format)
         return strValue
     }
@@ -1473,7 +1478,7 @@ class ScreenRenderImpl implements ScreenRender {
 
             String mapAttr = formNode.attribute("map")
             String mapName = mapAttr != null && mapAttr.length() > 0 ? mapAttr : "fieldValues"
-            Map valueMap = (Map) ec.resource.expression(mapName, "")
+            Map valueMap = (Map) ec.resourceFacade.expression(mapName, "")
 
             if (valueMap != null) {
                 try {
@@ -1499,7 +1504,7 @@ class ScreenRenderImpl implements ScreenRender {
             return value
         }
 
-        String defaultStr = ec.getResource().expand(defaultValue, null)
+        String defaultStr = ec.resourceFacade.expandNoL10n(defaultValue, null)
         if (defaultStr != null && defaultStr.length() > 0) return defaultStr
         return value
     }
@@ -1547,6 +1552,161 @@ class ScreenRenderImpl implements ScreenRender {
             return ec.resource.expand(defaultText, null)
         } else {
             return ""
+        }
+    }
+
+    Map<String, Object> getFormFieldValues(MNode formNode) {
+        Map<String, Object> fieldValues = new LinkedHashMap<>()
+
+        if ("true".equals(formNode.attribute("pass-through-parameters"))) {
+            UrlInstance currentFindUrl = getScreenUrlInstance().cloneUrlInstance().removeParameter("pageIndex")
+                    .removeParameter("moquiFormName").removeParameter("moquiSessionToken")
+                    .removeParameter("lastStandalone").removeParameter("formListFindId")
+            fieldValues.putAll(currentFindUrl.getParameterMap())
+        }
+
+        fieldValues.put("moquiFormName", formNode.attribute("name"))
+        String lastUpdatedString = getNamedValuePlain("lastUpdatedStamp", formNode)
+        if (lastUpdatedString != null && !lastUpdatedString.isEmpty()) fieldValues.put("lastUpdatedStamp", lastUpdatedString)
+
+        ArrayList<MNode> allFieldNodes = formNode.children("field")
+        int afnSize = allFieldNodes.size()
+        for (int i = 0; i < afnSize; i++) {
+            MNode fieldNode = (MNode) allFieldNodes.get(i)
+            addFormFieldValue(fieldNode, fieldValues)
+        }
+        return fieldValues
+    }
+    // NOTE: this takes a fieldValues Map as a parameter to populate because a singe form field may have multiple values
+    void addFormFieldValue(MNode fieldNode, Map<String, Object> fieldValues) {
+        String fieldName = fieldNode.attribute("name")
+
+        MNode activeSubNode = (MNode) null
+        ArrayList<MNode> condFieldNodeList = fieldNode.children("conditional-field")
+        for (int j = 0; j < condFieldNodeList.size(); j++) {
+            MNode condFieldNode = (MNode) condFieldNodeList.get(j)
+            String condition = condFieldNode.attribute("condition")
+            if (condition == null || condition.isEmpty()) {
+                logger.warn("Screen ${activeScreenDef.getScreenName()} field ${fieldName} conditional-field has no condition, skipping")
+                continue
+            }
+            if (ec.resourceFacade.condition(condition, null)) activeSubNode = condFieldNode
+        }
+        if (activeSubNode == null) activeSubNode = fieldNode.first("default-field")
+        if (activeSubNode == null) return
+
+        ArrayList<MNode> childNodeList = activeSubNode.getChildren()
+        for (int k = 0; k < childNodeList.size(); k++) {
+            MNode widgetNode = (MNode) childNodeList.get(k)
+
+            String valuePlainString = getFieldValuePlainString(fieldNode, "")
+            if (valuePlainString == null || valuePlainString.isEmpty())
+                valuePlainString = ec.resourceFacade.expandNoL10n(widgetNode.attribute("no-current-selected-key"), null)
+            if (valuePlainString != null && !valuePlainString.isEmpty() && valuePlainString.charAt(0) == ('[' as char))
+                valuePlainString = valuePlainString.substring(1, valuePlainString.length() - 1).replaceAll(" ", "")
+            String[] currentValueArr = valuePlainString != null ? valuePlainString.split(",") : null
+
+            String widgetName = widgetNode.getName()
+            if ("drop-down".equals(widgetName)) {
+                boolean allowMultiple = "true".equals(ec.resourceFacade.expandNoL10n(widgetNode.attribute("allow-multiple"), null))
+                if (allowMultiple) {
+                    fieldValues.put(fieldName, new ArrayList(Arrays.asList(currentValueArr)))
+                } else {
+                    fieldValues.put(fieldName, currentValueArr[0])
+                }
+            } else if ("text-line".equals(widgetName)) {
+                fieldValues.put(fieldName, getFieldValueString(widgetNode))
+            } else if ("check".equals(widgetName)) {
+                if ("true".equals(ec.resourceFacade.expandNoL10n(widgetNode.attribute("all-checked"), null))) {
+                    // get all options and add ArrayList
+                    Set<String> fieldOptionKeys = getFieldOptions(widgetNode).keySet()
+                    if (fieldOptionKeys.size() == 1) fieldValues.put(fieldName, fieldOptionKeys.first())
+                    else fieldValues.put(fieldName, new ArrayList(fieldOptionKeys))
+                } else {
+                    if (currentValueArr.length == 1) fieldValues.put(fieldName, currentValueArr[0])
+                    else fieldValues.put(fieldName, new ArrayList(Arrays.asList(currentValueArr)))
+                }
+            } else if ("date-find".equals(widgetName)) {
+                String type = widgetNode.attribute("type")
+                String defaultFormat = "date".equals(type) ? "yyyy-MM-dd" : ("time".equals(type) ? "HH:mm" : "yyyy-MM-dd HH:mm")
+                String fieldValueFrom = ec.l10nFacade.format(ec.getWeb()?.getParameters()?.get(fieldName + "_from") ?: widgetNode.attribute("default-value-from"), defaultFormat)
+                String fieldValueThru = ec.l10nFacade.format(ec.getWeb()?.getParameters()?.get(fieldName + "_thru") ?: widgetNode.attribute("default-value-thru"), defaultFormat)
+                fieldValues.put(fieldName + "_from", fieldValueFrom)
+                fieldValues.put(fieldName + "_thru", fieldValueThru)
+            } else if ("date-period".equals(widgetName)) {
+                fieldValues.put(fieldName + "_poffset", ec.getWeb()?.getParameters()?.get(fieldName + "_poffset"))
+                fieldValues.put(fieldName + "_period", ec.getWeb()?.getParameters()?.get(fieldName + "_period"))
+                fieldValues.put(fieldName + "_pdate", ec.getWeb()?.getParameters()?.get(fieldName + "_pdate"))
+                fieldValues.put(fieldName + "_from", ec.getWeb()?.getParameters()?.get(fieldName + "_from"))
+                fieldValues.put(fieldName + "_thru", ec.getWeb()?.getParameters()?.get(fieldName + "_thru"))
+            } else if ("date-time".equals(widgetName)) {
+                String type = widgetNode.attribute("type")
+                String javaFormat = "date".equals(type) ? "yyyy-MM-dd" : ("time".equals(type) ? "HH:mm" : "yyyy-MM-dd HH:mm")
+                fieldValues.put(fieldName, getFieldValueString(fieldNode, widgetNode.attribute("default-value"), javaFormat))
+            } else if ("display".equals(widgetName)) {
+                // primary value is for hidden field only, otherwise add nothing (display only)
+                String alsoHidden = widgetNode.attribute("also-hidden")
+                if (alsoHidden == null || alsoHidden.isEmpty() || "true".equals(alsoHidden))
+                    fieldValues.put(fieldName, valuePlainString)
+
+                // display value, reproduce logic that was in the ftl display macro
+                String fieldValue = (String) null
+                String textAttr = widgetNode.attribute("text")
+                String currencyAttr = widgetNode.attribute("currency-unit-field")
+                if (textAttr != null && ! textAttr.isEmpty()) {
+                    String textMapAttr = widgetNode.attribute("text-map")
+                    Map textMap = (Map) null
+                    if (textMapAttr != null && !textMapAttr.isEmpty())
+                        textMap = (Map) ec.resourceFacade.expression(textMapAttr, null)
+                    if (textMap != null && textMap.size() > 0) {
+                        fieldValue = ec.resourceFacade.expand(textAttr, null, textMap)
+                    } else {
+                        fieldValue = ec.resourceFacade.expand(textAttr, null)
+                    }
+                    if (currencyAttr != null && !currencyAttr.isEmpty())
+                        fieldValue = ec.l10nFacade.formatCurrency(fieldValue, ec.resourceFacade.expression(currencyAttr, null) as String)
+                } else if (currencyAttr != null && !currencyAttr.isEmpty()) {
+                    fieldValue = ec.l10nFacade.formatCurrency(getFieldValue(fieldNode, ""), ec.resourceFacade.expression(currencyAttr, null) as String)
+                } else {
+                    fieldValue = getFieldValueString(widgetNode)
+                }
+                fieldValues.put(fieldName + "_display", fieldValue)
+
+                // TODO: handle dynamic-transition attribute for initial value, and dynamic on client side too
+            } else if ("display-entity".equals(widgetName)) {
+                // primary value is for hidden field only, otherwise add nothing (display only)
+                String alsoHidden = widgetNode.attribute("also-hidden")
+                if (alsoHidden == null || alsoHidden.isEmpty() || "true".equals(alsoHidden))
+                    fieldValues.put(fieldName, valuePlainString)
+
+                // display value, reproduce logic that was in the ftl display macro
+                fieldValues.put(fieldName + "_display", getFieldEntityValue(widgetNode))
+            } else if ("hidden".equals(widgetName)) {
+                fieldValues.put(fieldName, getFieldValuePlainString(fieldNode, widgetNode.attribute("default-value")))
+            } else if ("file".equals(widgetName) || "ignored".equals(widgetName) || "password".equals(widgetName)) {
+                // do nothing
+            } else if ("radio".equals(widgetName)) {
+                fieldValues.put(fieldName, getFieldValueString(fieldNode, widgetNode.attribute("no-current-selected-key"), null))
+            } else if ("range-find".equals(widgetName)) {
+                fieldValues.put(fieldName + "_from", ec.getWeb()?.getParameters()?.get(fieldName + "_from"))
+                fieldValues.put(fieldName + "_thru", ec.getWeb()?.getParameters()?.get(fieldName + "_thru"))
+            } else if ("text-area".equals(widgetName)) {
+                fieldValues.put(fieldName, getFieldValueString(widgetNode))
+            } else if ("text-find".equals(widgetName)) {
+                fieldValues.put(fieldName, getFieldValueString(widgetNode))
+                String opName = fieldName + "_op"
+                String opValue = ec.getWeb()?.getParameters()?.get(opName) ?: widgetNode.attribute("default-operator") ?: "contains"
+                fieldValues.put(opName, opValue)
+                String notName = fieldName + "_not"
+                String notValue = ec.getWeb()?.getParameters()?.get(notName)
+                fieldValues.put(notName, notValue)
+                String icName = fieldName + "_ic"
+                String icValue = ec.getWeb()?.getParameters()?.get(icName)
+                fieldValues.put(icName, icValue)
+            } else {
+                // unknown/other type
+                fieldValues.put(fieldName, valuePlainString)
+            }
         }
     }
 
